@@ -83,6 +83,7 @@ func (g Generator) RegisterMarker() (*markers.Registry, error) {
 		clientgen.NonNamespacedMarker,
 		clientgen.SkipVerbsMarker,
 		clientgen.OnlyVerbsMarker,
+		clientgen.GroupNameMarker,
 	); err != nil {
 		return nil, fmt.Errorf("error registering markers")
 	}
@@ -164,6 +165,7 @@ func (g *Generator) configure(f flag.Flags) error {
 func (g *Generator) GetGVKs(ctx *genall.GenerationContext) (map[types.Group]map[types.PackageVersion][]informergen.Kind, error) {
 
 	gvks := map[types.Group]map[types.PackageVersion][]informergen.Kind{}
+	renamedGroups := map[types.Group]types.Group{}
 
 	for _, gv := range g.groupVersions {
 		if _, ok := gvks[gv.Group]; !ok {
@@ -187,6 +189,16 @@ func (g *Generator) GetGVKs(ctx *genall.GenerationContext) (map[types.Group]map[
 			}
 			ctx.Roots = pkgs
 			for _, root := range ctx.Roots {
+				packageMarkers, _ := markers.PackageMarkers(ctx.Collector, root)
+				if packageMarkers != nil {
+					val, ok := packageMarkers.Get(clientgen.GroupNameMarker.Name).(markers.RawArguments)
+					if ok {
+						groupName := strings.Split(string(val), ".")[0]
+						if gv.Group.String() != groupName {
+							renamedGroups[gv.Group] = types.Group(groupName)
+						}
+					}
+				}
 				if typeErr := markers.EachType(ctx.Collector, root, func(info *markers.TypeInfo) {
 
 					// if not enabled for this type, skip
@@ -211,6 +223,11 @@ func (g *Generator) GetGVKs(ctx *genall.GenerationContext) (map[types.Group]map[
 		if len(gvks[gv.Group]) == 0 {
 			delete(gvks, gv.Group)
 		}
+	}
+
+	for oldGroupName, newGroupName := range renamedGroups {
+		gvks[newGroupName] = gvks[oldGroupName]
+		delete(gvks, oldGroupName)
 	}
 
 	return gvks, nil

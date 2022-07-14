@@ -28,6 +28,8 @@ var (
 	// controller-tools, comma indicates another argument, as multiple arguments need to provided with a semi-colon separator.
 	SkipVerbsMarker = markers.Must(markers.MakeDefinition("genclient:skipVerbs", markers.DescribesType, markers.RawArguments("")))
 	OnlyVerbsMarker = markers.Must(markers.MakeDefinition("genclient:onlyVerbs", markers.DescribesType, markers.RawArguments("")))
+
+	GroupNameMarker = markers.Must(markers.MakeDefinition("groupName", markers.DescribesPackage, markers.RawArguments("")))
 )
 
 // IsEnabledForMethod verifies if the genclient marker is enabled for
