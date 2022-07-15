@@ -26,7 +26,6 @@ import (
 	"strings"
 
 	"golang.org/x/tools/go/packages"
-	"k8s.io/code-generator/cmd/client-gen/args"
 	"k8s.io/code-generator/cmd/client-gen/types"
 	"sigs.k8s.io/controller-tools/pkg/genall"
 	"sigs.k8s.io/controller-tools/pkg/loader"
@@ -34,6 +33,7 @@ import (
 
 	"github.com/kcp-dev/code-generator/pkg/flag"
 	"github.com/kcp-dev/code-generator/pkg/internal/clientgen"
+	"github.com/kcp-dev/code-generator/pkg/parser"
 	"github.com/kcp-dev/code-generator/pkg/util"
 	genutil "k8s.io/code-generator/cmd/client-gen/generators/util"
 )
@@ -46,22 +46,6 @@ const (
 	// name of the file while wrapped clientset is written.
 	clientSetFilename = "clientset.go"
 )
-
-var (
-	// In controller-tool's terms marker's are defined in the following format: <makername>:<parameter>=<values>. These
-	// markers are not a part of genclient, since they do not accept any values.
-	noStatusMarker = markers.Must(markers.MakeDefinition("genclient:noStatus", markers.DescribesType, struct{}{}))
-	noVerbsMarker  = markers.Must(markers.MakeDefinition("genclient:noVerbs", markers.DescribesType, struct{}{}))
-	readOnlyMarker = markers.Must(markers.MakeDefinition("genclient:readonly", markers.DescribesType, struct{}{}))
-)
-
-type genclient struct {
-	Method      *string
-	Verb        *string
-	Subresource *string
-	Input       *string
-	Result      *string
-}
 
 type Generator struct {
 	// inputDir is the path where types are defined.
@@ -104,13 +88,13 @@ func (g Generator) RegisterMarker() (*markers.Registry, error) {
 	reg := &markers.Registry{}
 	if err := markers.RegisterAll(
 		reg,
-		GenclientMarker,
-		NonNamespacedMarker,
-		noStatusMarker,
-		noVerbsMarker,
-		readOnlyMarker,
-		SkipVerbsMarker,
-		OnlyVerbsMarker,
+		parser.GenclientMarker,
+		parser.NonNamespacedMarker,
+		parser.NoStatusMarker,
+		parser.NoVerbsMarker,
+		parser.ReadOnlyMarker,
+		parser.SkipVerbsMarker,
+		parser.OnlyVerbsMarker,
 	); err != nil {
 		return nil, fmt.Errorf("error registering markers")
 	}
@@ -183,42 +167,12 @@ func (g *Generator) setDefaults(f flag.Flags) (err error) {
 	if err != nil {
 		return err
 	}
-	gvs, err := GetGV(f)
+	gvs, err := parser.GetGV(f)
 	if err != nil {
 		return err
 	}
 	g.groupVersions = append(g.groupVersions, gvs...)
 	return nil
-}
-
-// GetGV parses the Group Versions provided in the input through flags
-// and creates a list of []types.GroupVersions.
-func GetGV(f flag.Flags) ([]types.GroupVersions, error) {
-	groupVersions := make([]types.GroupVersions, 0)
-	// Its already validated that list of group versions cannot be empty.
-	gvs := f.GroupVersions
-	for _, gv := range gvs {
-		// arr[0] -> group, arr[1] -> versions
-		arr := strings.Split(gv, ":")
-		if len(arr) != 2 {
-			return nil, fmt.Errorf("input to --group-version must be in <group>:<versions> format, ex: rbac:v1. Got %q", gv)
-		}
-
-		versions := strings.Split(arr[1], ",")
-		for _, v := range versions {
-			// input path is converted to <inputDir>/<group>/<version>.
-			// example for input directory of "k8s.io/client-go/kubernetes/pkg/apis/", it would
-			// be converted to "k8s.io/client-go/kubernetes/pkg/apis/rbac/v1".
-			input := filepath.Join(f.InputDir, arr[0], v)
-			groups := []types.GroupVersions{}
-			builder := args.NewGroupVersionsBuilder(&groups)
-			_ = args.NewGVPackagesValue(builder, []string{input})
-
-			groupVersions = append(groupVersions, groups...)
-
-		}
-	}
-	return groupVersions, nil
 }
 
 // generate first generates the wrapper for all the interfaces provided in the input.
@@ -335,7 +289,7 @@ func (g *Generator) generateSubInterfaces(ctx *genall.GenerationContext) error {
 				var outContent bytes.Buffer
 
 				// if not enabled for this type, skip
-				if !IsEnabledForMethod(info) {
+				if !parser.IsEnabledForMethod(info) {
 					return
 				}
 
@@ -367,29 +321,29 @@ func (g *Generator) generateSubInterfaces(ctx *genall.GenerationContext) error {
 				var skipVerbs []string
 				var onlyVerbs []string
 
-				genclientMarkers := info.Markers[GenclientMarker.Name]
+				genclientMarkers := info.Markers[parser.GenclientMarker.Name]
 
-				namespaceScoped := info.Markers.Get(NonNamespacedMarker.Name) == nil
-				noVerbs := info.Markers.Get(noVerbsMarker.Name) != nil
-				hasStatus := HasStatusSubresource(info)
-				readOnly := info.Markers.Get(readOnlyMarker.Name) != nil
+				namespaceScoped := info.Markers.Get(parser.NonNamespacedMarker.Name) == nil
+				noVerbs := info.Markers.Get(parser.NoVerbsMarker.Name) != nil
+				hasStatus := parser.HasStatusSubresource(info)
+				readOnly := info.Markers.Get(parser.ReadOnlyMarker.Name) != nil
 
 				// Extract values from skip verbs marker.
-				sVerbs := info.Markers.Get(SkipVerbsMarker.Name)
+				sVerbs := info.Markers.Get(parser.SkipVerbsMarker.Name)
 				if sVerbs != nil {
 					val, ok := sVerbs.(markers.RawArguments)
 					if !ok {
-						root.AddError(fmt.Errorf("marker defined in wrong format %q", SkipVerbsMarker.Name))
+						root.AddError(fmt.Errorf("marker defined in wrong format %q", parser.SkipVerbsMarker.Name))
 					}
 					skipVerbs = strings.Split(string(val), ",")
 				}
 
 				// Extract values from only verbs marker.
-				oVerbs := info.Markers.Get(OnlyVerbsMarker.Name)
+				oVerbs := info.Markers.Get(parser.OnlyVerbsMarker.Name)
 				if oVerbs != nil {
 					val, ok := oVerbs.(markers.RawArguments)
 					if !ok {
-						root.AddError(fmt.Errorf("marker defined in wrong format %q", OnlyVerbsMarker.Name))
+						root.AddError(fmt.Errorf("marker defined in wrong format %q", parser.OnlyVerbsMarker.Name))
 					}
 					onlyVerbs = append(onlyVerbs, strings.Split(string(val), ",")...)
 				}
@@ -399,9 +353,9 @@ func (g *Generator) generateSubInterfaces(ctx *genall.GenerationContext) error {
 				}
 
 				for _, m := range genclientMarkers {
-					gm, ok := m.(genclient)
+					gm, ok := m.(parser.GenClient)
 					if !ok {
-						root.AddError(fmt.Errorf("marker defined in wrong format %q", GenclientMarker.Name))
+						root.AddError(fmt.Errorf("marker defined in wrong format %q", parser.GenclientMarker.Name))
 					}
 
 					if gm.Method != nil {

@@ -32,7 +32,6 @@ import (
 	"sigs.k8s.io/controller-tools/pkg/markers"
 
 	"github.com/kcp-dev/code-generator/pkg/flag"
-	"github.com/kcp-dev/code-generator/pkg/generators/clientgen"
 	"github.com/kcp-dev/code-generator/pkg/internal/informergen"
 	"github.com/kcp-dev/code-generator/pkg/parser"
 	"github.com/kcp-dev/code-generator/pkg/util"
@@ -78,11 +77,11 @@ type Generator struct {
 func (g Generator) RegisterMarker() (*markers.Registry, error) {
 	reg := &markers.Registry{}
 	if err := markers.RegisterAll(reg,
-		clientgen.GenclientMarker,
-		clientgen.NonNamespacedMarker,
-		clientgen.SkipVerbsMarker,
-		clientgen.OnlyVerbsMarker,
-		clientgen.GroupNameMarker,
+		parser.GenclientMarker,
+		parser.NonNamespacedMarker,
+		parser.SkipVerbsMarker,
+		parser.OnlyVerbsMarker,
+		parser.GroupNameMarker,
 	); err != nil {
 		return nil, fmt.Errorf("error registering markers")
 	}
@@ -151,7 +150,7 @@ func (g *Generator) configure(f flag.Flags) error {
 		return err
 	}
 
-	gvs, err := clientgen.GetGV(f)
+	gvs, err := parser.GetGV(f)
 	if err != nil {
 		return err
 	}

@@ -1,20 +1,73 @@
 package parser
 
 import (
+	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"golang.org/x/tools/go/packages"
 
+	"k8s.io/code-generator/cmd/client-gen/args"
 	"k8s.io/code-generator/cmd/client-gen/types"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-tools/pkg/genall"
 	"sigs.k8s.io/controller-tools/pkg/loader"
 	"sigs.k8s.io/controller-tools/pkg/markers"
 
-	"github.com/kcp-dev/code-generator/pkg/generators/clientgen"
+	"github.com/kcp-dev/code-generator/pkg/flag"
 )
+
+// GetGV parses the Group Versions provided in the input through flags
+// and creates a list of []types.GroupVersions.
+func GetGV(f flag.Flags) ([]types.GroupVersions, error) {
+	dedupGVs := map[string][]types.GroupVersions{}
+	groupVersions := make([]types.GroupVersions, 0)
+
+	// Its already validated that list of group versions cannot be empty.
+	inputGVs := f.GroupVersions
+	for _, gv := range inputGVs {
+		// arr[0] -> group, arr[1] -> versions
+		arr := strings.Split(gv, ":")
+		if len(arr) != 2 {
+			return nil, fmt.Errorf("input to --group-version must be in <group>:<versions> format, ex: rbac:v1. Got %q", gv)
+		}
+		if _, ok := dedupGVs[arr[0]]; !ok {
+			dedupGVs[arr[0]] = []types.GroupVersions{}
+		}
+
+		versions := strings.Split(arr[1], ",")
+		for _, v := range versions {
+			// input path is converted to <inputDir>/<group>/<version>.
+			// example for input directory of "k8s.io/client-go/kubernetes/pkg/apis/", it would
+			// be converted to "k8s.io/client-go/kubernetes/pkg/apis/rbac/v1".
+			input := filepath.Join(f.InputDir, arr[0], v)
+			groups := []types.GroupVersions{}
+			builder := args.NewGroupVersionsBuilder(&groups)
+			_ = args.NewGVPackagesValue(builder, []string{input})
+
+			for _, group := range groups {
+				dedupGVs[arr[0]] = append(dedupGVs[arr[0]], group)
+			}
+		}
+	}
+	for _, groupversions := range dedupGVs {
+		finalGV := types.GroupVersions{}
+
+		for _, groupversion := range groupversions {
+			if finalGV.PackageName == "" {
+				finalGV.PackageName = groupversion.PackageName
+			}
+			if finalGV.Group.String() == "" {
+				finalGV.Group = groupversion.Group
+			}
+			finalGV.Versions = append(finalGV.Versions, groupversion.Versions...)
+
+		}
+		groupVersions = append(groupVersions, finalGV)
+	}
+	return groupVersions, nil
+}
 
 func GetGVKs(ctx *genall.GenerationContext, inputDir string, groupVersions []types.GroupVersions) (map[Group]map[types.PackageVersion][]Kind, error) {
 
@@ -39,7 +92,7 @@ func GetGVKs(ctx *genall.GenerationContext, inputDir string, groupVersions []typ
 			for _, root := range ctx.Roots {
 				packageMarkers, _ := markers.PackageMarkers(ctx.Collector, root)
 				if packageMarkers != nil {
-					val, ok := packageMarkers.Get(clientgen.GroupNameMarker.Name).(markers.RawArguments)
+					val, ok := packageMarkers.Get(GroupNameMarker.Name).(markers.RawArguments)
 					if ok {
 						group.FullName = string(val)
 						groupGoName := strings.Split(group.FullName, ".")[0]
@@ -60,10 +113,10 @@ func GetGVKs(ctx *genall.GenerationContext, inputDir string, groupVersions []typ
 				if typeErr := markers.EachType(ctx.Collector, root, func(info *markers.TypeInfo) {
 
 					// if not enabled for this type, skip
-					if !clientgen.IsEnabledForMethod(info) {
+					if !IsEnabledForMethod(info) {
 						return
 					}
-					namespaced := !clientgen.IsClusterScoped(info)
+					namespaced := !IsClusterScoped(info)
 					gvks[group][packageVersion] = append(gvks[group][packageVersion], NewKind(info.Name, namespaced))
 
 				}); typeErr != nil {

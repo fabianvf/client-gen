@@ -14,14 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package clientgen
+package parser
 
 import "sigs.k8s.io/controller-tools/pkg/markers"
 
 var (
 	// In controller-tool's terms marker's are defined in the following format: <makername>:<parameter>=<values>. These
 	// markers are not a part of genclient, since they do not accept any values.
-	GenclientMarker     = markers.Must(markers.MakeDefinition("genclient", markers.DescribesType, genclient{}))
+	GenclientMarker     = markers.Must(markers.MakeDefinition("genclient", markers.DescribesType, GenClient{}))
 	NonNamespacedMarker = markers.Must(markers.MakeDefinition("genclient:nonNamespaced", markers.DescribesType, struct{}{}))
 
 	// These markers, are not a part of "+genclient", and are defined separately because they accept a list which is comma separated. In
@@ -30,7 +30,21 @@ var (
 	OnlyVerbsMarker = markers.Must(markers.MakeDefinition("genclient:onlyVerbs", markers.DescribesType, markers.RawArguments("")))
 
 	GroupNameMarker = markers.Must(markers.MakeDefinition("groupName", markers.DescribesPackage, markers.RawArguments("")))
+
+	// In controller-tool's terms marker's are defined in the following format: <makername>:<parameter>=<values>. These
+	// markers are not a part of genclient, since they do not accept any values.
+	NoStatusMarker = markers.Must(markers.MakeDefinition("genclient:noStatus", markers.DescribesType, struct{}{}))
+	NoVerbsMarker  = markers.Must(markers.MakeDefinition("genclient:noVerbs", markers.DescribesType, struct{}{}))
+	ReadOnlyMarker = markers.Must(markers.MakeDefinition("genclient:readonly", markers.DescribesType, struct{}{}))
 )
+
+type GenClient struct {
+	Method      *string
+	Verb        *string
+	Subresource *string
+	Input       *string
+	Result      *string
+}
 
 // IsEnabledForMethod verifies if the genclient marker is enabled for
 // this type or not.
@@ -50,7 +64,7 @@ func IsClusterScoped(info *markers.TypeInfo) bool {
 // if `noStatus` marker is present is returns false. Else it checks if
 // the type has Status field.
 func HasStatusSubresource(info *markers.TypeInfo) bool {
-	if info.Markers.Get(noStatusMarker.Name) != nil {
+	if info.Markers.Get(NoStatusMarker.Name) != nil {
 		return false
 	}
 
