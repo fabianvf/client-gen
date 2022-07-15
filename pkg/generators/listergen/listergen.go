@@ -45,25 +45,28 @@ const (
 type Generator struct {
 	// inputDir is the path where types are defined.
 	inputDir string
-	// inputpkgPaths stores details on input directory.
-	inputpkgPaths pkgPaths
+
+	//inputPkgPath stores the input package for the apis.
+	inputPkgPath string
+
+	// outputPkgPath stores the output package path for informers.
+	outputPkgPath string
+
 	// output Dir where the wrappers are to be written.
 	outputDir string
+
 	// GroupVersions for whom the clients are to be generated.
 	groupVersions []types.GroupVersions
+
+	// GroupVersionKinds contains all the needed APIs to scaffold
+	groupVersionKinds map[parser.Group]map[types.PackageVersion][]parser.Kind
+
 	// headerText is the header text to be added to generated wrappers.
 	// It is obtained from `--go-header-text` flag.
 	headerText string
-}
 
-type pkgPaths struct {
-	// basePacakge path as found in go module.
-	basePackage string
-	// hasGoMod is a way of checking if the go.mod file is present inside
-	// the input directory or not. If present the basepkg path need not be modified
-	// to include the location of input directory. If not, include the location of
-	// all the sub folders provided in the input directory.
-	hasGoMod bool
+	// path to where generated clientsets are found.
+	clientSetAPIPath string
 }
 
 func (g Generator) RegisterMarker() (*markers.Registry, error) {
@@ -73,6 +76,7 @@ func (g Generator) RegisterMarker() (*markers.Registry, error) {
 		parser.NonNamespacedMarker,
 		parser.SkipVerbsMarker,
 		parser.OnlyVerbsMarker,
+		parser.GroupNameMarker,
 	); err != nil {
 		return nil, fmt.Errorf("error registering markers")
 	}
@@ -84,13 +88,20 @@ func (g Generator) GetName() string {
 }
 
 func (g Generator) Run(ctx *genall.GenerationContext, f flag.Flags) error {
-	if err := flag.ValidateFlags(f); err != nil {
+	var err error
+
+	if err = flag.ValidateFlags(f); err != nil {
 		return err
 	}
-	if err := g.setDefaults(f); err != nil {
+	if err = g.setDefaults(f); err != nil {
 		return err
 	}
-	if err := g.generate(ctx); err != nil {
+
+	if g.groupVersionKinds, err = parser.GetGVKs(ctx, g.inputDir, g.groupVersions); err != nil {
+		return err
+	}
+
+	if err = g.generate(ctx); err != nil {
 		return err
 	}
 
@@ -105,113 +116,87 @@ func (g Generator) Run(ctx *genall.GenerationContext, f flag.Flags) error {
 }
 
 func (g *Generator) setDefaults(f flag.Flags) (err error) {
-	if f.InputDir != "" {
-		g.inputDir = f.InputDir
-		pkg, hasGoMod := util.CurrentPackage(f.InputDir)
-		if len(pkg) == 0 {
-			return fmt.Errorf("error finding the module path for this package %q", f.InputDir)
-		}
-		g.inputpkgPaths = pkgPaths{
-			basePackage: pkg,
-			hasGoMod:    hasGoMod,
-		}
+	if err := flag.ValidateFlags(f); err != nil {
+		return err
 	}
-	if f.OutputDir != "" {
-		g.outputDir = f.OutputDir
+
+	g.inputDir = f.InputDir
+	absoluteInputDir, err := filepath.Abs(g.inputDir)
+	if err != nil {
+		return err
 	}
+
+	pkg, hasGoMod := util.CurrentPackage(absoluteInputDir)
+	if len(pkg) == 0 {
+		return fmt.Errorf("error finding the module path for this package %q", f.InputDir)
+	}
+	cleanPkgPath := util.CleanInputDir(g.inputDir)
+	if !hasGoMod && cleanPkgPath != "" {
+		g.inputPkgPath = filepath.Join(pkg, cleanPkgPath)
+	} else {
+		g.inputPkgPath = pkg
+	}
+	g.outputDir = f.OutputDir
+	pkg, hasGoMod = util.CurrentPackage(f.OutputDir)
+	if len(pkg) == 0 {
+		return fmt.Errorf("error finding the module path for this package %q", f.OutputDir)
+	}
+
+	if !hasGoMod {
+		g.outputPkgPath = util.GetCleanRealtivePath(pkg, filepath.Clean(g.outputDir))
+	} else {
+		g.outputPkgPath = pkg
+	}
+
+	g.clientSetAPIPath = f.ClientsetAPIPath
+
 	g.headerText, err = util.GetHeaderText(f.GoHeaderFilePath)
 	if err != nil {
 		return err
 	}
+
 	gvs, err := parser.GetGV(f)
 	if err != nil {
 		return err
 	}
+
 	g.groupVersions = append(g.groupVersions, gvs...)
+
 	return nil
 }
 
 func (g *Generator) generate(ctx *genall.GenerationContext) error {
-	for _, gv := range g.groupVersions {
-		version := gv.Versions[0]
-
-		// This is to accomodate the usecase wherein the apis are defined under a sub-folder inside
-		// base package.
-		basePkg := g.inputpkgPaths.basePackage
-		if !g.inputpkgPaths.hasGoMod {
-			cleanPkgPath := util.CleanInputDir(g.inputDir)
-			if cleanPkgPath != "" {
-				basePkg = filepath.Join(g.inputpkgPaths.basePackage, cleanPkgPath)
-			}
-		}
-
-		path := filepath.Join(basePkg, gv.Group.String(), string(version.Version))
-
-		pkgs, err := loader.LoadRootsWithConfig(&packages.Config{Dir: g.inputDir}, path)
-		if err != nil {
-			return err
-		}
-
-		ctx.Roots = pkgs
-
-		for _, root := range pkgs {
-			root.NeedTypesInfo()
-
-			// this is to accomodate multiple types defined in single group
-			byType := make(map[string][]byte)
-
-			var outCommonContent bytes.Buffer
-			if err := g.writeHeader(&outCommonContent); err != nil {
-				root.AddError(err)
-			}
-
-			if eachTypeErr := markers.EachType(ctx.Collector, root, func(info *markers.TypeInfo) {
-				var outContent bytes.Buffer
-
-				// if not enabled for this type, skip
-				if !parser.IsEnabledForMethod(info) {
-					return
+	for group, versionKinds := range g.groupVersionKinds {
+		for version, kinds := range versionKinds {
+			for _, kind := range kinds {
+				var out bytes.Buffer
+				if err := g.writeHeader(&out); err != nil {
+					klog.Error(err)
+					continue
 				}
-				if err := g.writeHeader(&outContent); err != nil {
-					root.AddError(err)
+				klog.Infof("Generating lister for GroupVersionKind %s:%s/%s", group.Name, version.String(), kind.String())
+				lister := listergen.Lister{
+					Group:   group,
+					Version: version,
+					Kind:    kind,
+					APIPath: filepath.Join(g.inputPkgPath, group.Name, version.String()),
+				}
+				if err := lister.WriteContent(&out); err != nil {
+					klog.Error(err)
+					continue
 				}
 
-				klog.Infof("Generating lister for GroupVersionKind %s:%s/%s", gv.Group.String(), version.String(), info.Name)
-				a, err := listergen.NewAPI(root, info, string(version.Version), gv.PackageName, path, !parser.IsClusterScoped(info), &outContent)
-				if err != nil {
-					root.AddError(err)
-					return
-				}
-
-				err = a.WriteContent()
-				if err != nil {
-					root.AddError(err)
-					return
-				}
-
-				outBytes := outContent.Bytes()
+				outBytes := out.Bytes()
 				formattedBytes, err := format.Source(outBytes)
 				if err != nil {
-					root.AddError(err)
-				} else {
-					outBytes = formattedBytes
+					klog.Error(err)
+					continue
 				}
-				if len(outBytes) > 0 {
-					byType[info.Name] = outBytes
-				}
-			}); eachTypeErr != nil {
-				return eachTypeErr
-			}
-
-			if len(byType) == 0 {
-				continue
-			}
-
-			for typeName, content := range byType {
-				filename := strings.ToLower(typeName) + util.ExtensionGo
-				err = util.WriteContent(content, filename, filepath.Join(g.outputDir, "listers", gv.Group.PackageName(), string(version.Version)))
+				filename := strings.ToLower(kind.String()) + util.ExtensionGo
+				err = util.WriteContent(formattedBytes, filename, filepath.Join(g.outputDir, "listers", group.Name, string(version.Version)))
 				if err != nil {
-					root.AddError(err)
+					klog.Error(err)
+					continue
 				}
 			}
 		}
